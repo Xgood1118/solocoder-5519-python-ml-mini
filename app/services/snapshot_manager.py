@@ -3,7 +3,6 @@ import joblib
 from typing import Optional, List
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import LabelEncoder
 
 from config import Config
 from app.models import ModelSnapshot, Category, get_db_session
@@ -51,30 +50,44 @@ class SnapshotManager:
             if not os.path.exists(snapshot.vectorizer_path):
                 raise FileNotFoundError(f"Vectorizer file not found: {snapshot.vectorizer_path}")
             
+            logger.info(f"Loading snapshot {snapshot_id}: model={snapshot.model_path}, vec={snapshot.vectorizer_path}")
+            
             model: MultinomialNB = joblib.load(snapshot.model_path)
+            logger.info(f"  Model loaded, type={type(model).__name__}, classes_encoded={model.classes_.tolist()}")
+            
             vectorizer: TfidfVectorizer = joblib.load(snapshot.vectorizer_path)
+            logger.info(f"  Vectorizer loaded, vocab_size={len(vectorizer.vocabulary_)}")
             
-            categories = db.query(Category).all()
-            category_names = [cat.name for cat in categories]
+            classes = snapshot.classes
+            if not classes:
+                logger.warning(f"  Snapshot has no classes field in DB, reconstructing from categories")
+                categories = db.query(Category).all()
+                category_names = [cat.name for cat in categories]
+                classes = [category_names[i] for i in model.classes_]
+                snapshot.classes = classes
+                db.commit()
+                logger.warning(f"  Reconstructed classes and saved back: {classes}")
             
-            label_encoder = LabelEncoder()
-            label_encoder.fit(category_names)
-            classes = label_encoder.classes_.tolist()
+            model_classes_names = [classes[i] for i in model.classes_]
+            assert model_classes_names == classes, (
+                f"Class order mismatch! model.classes_ -> names={model_classes_names} "
+                f"vs snapshot.classes={classes}"
+            )
+            logger.info(f"  Classes verified OK: {classes}")
             
-            if hasattr(model, "classes_"):
-                model_classes = [category_names[i] for i in model.classes_]
-                if set(model_classes) == set(classes):
-                    classes = model_classes
-            
-            db.query(ModelSnapshot).update({ModelSnapshot.is_active: 0})
+            db.query(ModelSnapshot).filter(ModelSnapshot.id != snapshot_id).update({ModelSnapshot.is_active: 0})
             snapshot.is_active = 1
             db.commit()
             
             predictor.load_model(model, vectorizer, classes, snapshot_id)
-            logger.info(f"Loaded snapshot {snapshot_id} as active model")
+            logger.info(f"  Predictor ready={predictor.is_ready()}, snapshot_id={predictor.snapshot_id}")
             return True
+        except AssertionError as e:
+            logger.error(f"Load snapshot {snapshot_id} class mismatch: {e}")
+            db.rollback()
+            raise
         except Exception as e:
-            logger.error(f"Error loading snapshot {snapshot_id}: {e}")
+            logger.error(f"Error loading snapshot {snapshot_id}: {e}", exc_info=True)
             db.rollback()
             raise
         finally:
@@ -84,11 +97,12 @@ class SnapshotManager:
     def load_latest_snapshot() -> bool:
         snapshot = SnapshotManager.get_latest_snapshot()
         if snapshot:
+            logger.info(f"Found latest snapshot, id={snapshot.id}, is_active={snapshot.is_active == 1}, classes={snapshot.classes}")
             try:
                 return SnapshotManager.load_snapshot(snapshot.id)
             except Exception as e:
-                logger.warning(f"Failed to load latest snapshot: {e}")
-        logger.info("No snapshot available to load")
+                logger.warning(f"Failed to load latest snapshot id={snapshot.id}: {e}")
+        logger.info("No snapshot available to load (predictor will return 503 until training)")
         return False
     
     @staticmethod

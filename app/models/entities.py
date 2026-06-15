@@ -55,6 +55,7 @@ class ModelSnapshot(Base):
     category_id = Column(Integer, ForeignKey("categories.id", ondelete="CASCADE"), nullable=False, index=True)
     model_path = Column(String(500), nullable=False)
     vectorizer_path = Column(String(500), nullable=False)
+    classes = Column(JSON)
     trained_at = Column(DateTime, default=datetime.utcnow, index=True)
     accuracy = Column(Float)
     precision = Column(Float)
@@ -75,6 +76,7 @@ class ModelSnapshot(Base):
             "category_id": self.category_id,
             "model_path": self.model_path,
             "vectorizer_path": self.vectorizer_path,
+            "classes": self.classes,
             "trained_at": self.trained_at.isoformat() if self.trained_at else None,
             "accuracy": self.accuracy,
             "precision": self.precision,

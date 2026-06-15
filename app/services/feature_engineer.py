@@ -18,7 +18,6 @@ class FeatureEngineer:
         logger.info(f"Creating TF-IDF vectorizer with config: {config}")
         
         self.vectorizer = TfidfVectorizer(
-            tokenizer=lambda x: x.split(),
             ngram_range=config["ngram_range"],
             min_df=config["min_df"],
             max_df=config["max_df"],
@@ -34,7 +33,7 @@ class FeatureEngineer:
         vectorizer = self.create_vectorizer(tfidf_config)
         X = vectorizer.fit_transform(processed_texts)
         
-        logger.info(f"TF-IDF matrix shape: {X.shape}, sparse: {isinstance(X, type(vectorizer.transform(['test'])))}")
+        logger.info(f"TF-IDF matrix shape: {X.shape}, sparse format: {X.format}")
         return X, vectorizer
     
     def transform(self, texts, vectorizer: TfidfVectorizer = None):
@@ -49,11 +48,14 @@ class FeatureEngineer:
     def save_vectorizer(self, vectorizer: TfidfVectorizer, filepath: str):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         joblib.dump(vectorizer, filepath)
-        logger.info(f"Vectorizer saved to {filepath}")
+        size_kb = os.path.getsize(filepath) / 1024
+        logger.info(f"Vectorizer saved to {filepath} ({size_kb:.1f} KB)")
     
     def load_vectorizer(self, filepath: str) -> TfidfVectorizer:
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Vectorizer file not found: {filepath}")
         self.vectorizer = joblib.load(filepath)
-        logger.info(f"Vectorizer loaded from {filepath}")
+        logger.info(f"Vectorizer loaded from {filepath}, vocab_size={len(self.vectorizer.vocabulary_)}")
         return self.vectorizer
 
 feature_engineer = FeatureEngineer()

@@ -84,7 +84,6 @@ class Trainer:
             
             categories = data_loader.get_categories()
             category_names = [cat.name for cat in categories]
-            category_id_map = {cat.id: cat.name for cat in categories}
             
             training_status.update_progress(training_id, 15, "Splitting train/test sets...")
             X_train_texts, X_test_texts, y_train, y_test = train_test_split(
@@ -118,7 +117,9 @@ class Trainer:
             
             y_train_encoded = label_encoder.transform(y_train)
             y_test_encoded = label_encoder.transform(y_test)
+            all_classes_encoded = label_encoder.transform(category_names)
             classes = label_encoder.classes_.tolist()
+            logger.info(f"Class mapping (index -> name): {dict(enumerate(classes))}")
             
             model = MultinomialNB()
             
@@ -127,10 +128,12 @@ class Trainer:
                 try:
                     base_snapshot = db.query(ModelSnapshot).filter(ModelSnapshot.id == base_snapshot_id).first()
                     if base_snapshot and os.path.exists(base_snapshot.model_path):
+                        if not os.path.exists(base_snapshot.model_path):
+                            raise FileNotFoundError(f"Base model file missing: {base_snapshot.model_path}")
                         base_model = joblib.load(base_snapshot.model_path)
                         model = base_model
-                        model.partial_fit(X_train, y_train_encoded, classes=np.unique(y_train_encoded))
-                        logger.info(f"Incremental learning from snapshot {base_snapshot_id}")
+                        model.partial_fit(X_train, y_train_encoded, classes=all_classes_encoded)
+                        logger.info(f"Incremental learning from snapshot {base_snapshot_id}, samples={len(y_train_encoded)}")
                     else:
                         model.fit(X_train, y_train_encoded)
                 finally:
@@ -138,10 +141,15 @@ class Trainer:
             else:
                 model.fit(X_train, y_train_encoded)
             
+            model_classes_encoded = model.classes_.tolist()
+            model_classes = [classes[i] for i in model_classes_encoded]
+            assert model_classes == classes, f"Model class order mismatch! model={model_classes} vs expected={classes}"
+            logger.info(f"Model class order verified OK: {model_classes}")
+            
             training_status.update_progress(training_id, 70, "Evaluating model...")
             y_pred_encoded = model.predict(X_test)
-            y_pred = label_encoder.inverse_transform(y_pred_encoded)
-            y_test_labels = label_encoder.inverse_transform(y_test_encoded)
+            y_pred = [classes[i] for i in y_pred_encoded]
+            y_test_labels = [classes[i] for i in y_test_encoded]
             
             metrics = evaluator.evaluate(y_test_labels, y_pred, classes)
             
@@ -150,8 +158,15 @@ class Trainer:
             model_path = os.path.join(Config.MODEL_DIR, f"{snapshot_name}.joblib")
             vectorizer_path = os.path.join(Config.MODEL_DIR, f"{snapshot_name}_vectorizer.joblib")
             
+            os.makedirs(Config.MODEL_DIR, exist_ok=True)
+            
             joblib.dump(model, model_path)
+            model_size_kb = os.path.getsize(model_path) / 1024
+            logger.info(f"Model saved to {model_path} ({model_size_kb:.1f} KB), exists={os.path.exists(model_path)}")
+            
             feature_engineer.save_vectorizer(vectorizer, vectorizer_path)
+            vec_size_kb = os.path.getsize(vectorizer_path) / 1024
+            logger.info(f"Vectorizer saved to {vectorizer_path} ({vec_size_kb:.1f} KB), exists={os.path.exists(vectorizer_path)}")
             
             default_cat_id = categories[0].id if categories else None
             
@@ -164,6 +179,7 @@ class Trainer:
                     category_id=default_cat_id,
                     model_path=model_path,
                     vectorizer_path=vectorizer_path,
+                    classes=classes,
                     accuracy=metrics["accuracy"],
                     precision=metrics["precision"],
                     recall=metrics["recall"],
@@ -178,11 +194,17 @@ class Trainer:
                 db.commit()
                 db.refresh(snapshot)
                 snapshot_id = snapshot.id
+                logger.info(f"Snapshot record written to DB, id={snapshot_id}, classes={snapshot.classes}")
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to write snapshot DB record: {e}", exc_info=True)
+                raise
             finally:
                 db.close()
             
             training_status.update_progress(training_id, 95, "Loading model for prediction...")
             predictor.load_model(model, vectorizer, classes, snapshot_id)
+            logger.info(f"Predictor loaded ready, model_ready={predictor.is_ready()}")
             
             self._cleanup_old_snapshots()
             
@@ -191,10 +213,12 @@ class Trainer:
                 "snapshot_name": snapshot_name,
                 "model_path": model_path,
                 "vectorizer_path": vectorizer_path,
+                "classes": classes,
                 "train_sample_count": len(X_train_texts),
                 "test_sample_count": len(X_test_texts),
                 "metrics": metrics,
-                "classes": classes
+                "model_size_kb": round(model_size_kb, 1),
+                "vectorizer_size_kb": round(vec_size_kb, 1)
             }
             
             training_status.complete_training(training_id, result)
